@@ -10,6 +10,7 @@ import time
 import uuid
 import urllib.parse
 
+from pathlib import Path
 from datetime import datetime, timedelta
 from email_validator import validate_email, EmailNotValidError
 from pandas import DataFrame, to_datetime
@@ -19,6 +20,8 @@ from . import endpoints
 
 
 class webull:
+
+    DEFAULT_CREDENTIAL_PATH = Path('webull_credentials.json')
 
     def __init__(self):
         self._session = requests.session()
@@ -89,7 +92,37 @@ class webull:
         return headers
 
 
-    def login(self, username='', password='', device_name='', mfa='', question_id='', question_answer='', save_token=False, token_path=None):
+    def credential_login(self, credential_path='', refresh=False):
+        credential_path = credential_path or webull.DEFAULT_CREDENTIAL_PATH
+        credential_path = Path(credential_path)
+        try:
+            with open(credential_path, 'r') as f:
+                credential_data = json.load(f)
+        except OSError as e:
+            print(f"Failed to open {credential_path}: {e}")
+            return None
+        self._refresh_token = credential_data['refreshToken']
+        self._access_token = credential_data['accessToken']
+        self._token_expire = credential_data['tokenExpireTime']
+        self._uuid = credential_data['uuid']
+        self._credential_data = credential_data
+        self.get_account_id()
+        if refresh:
+            self._credential_data = self.refresh_login()
+            self.save_credential(path=credential_path)
+        return credential_data
+
+
+    def save_credential(self, path='', credential_data=None):
+        credential_path = path or webull.DEFAULT_CREDENTIAL_PATH
+        credential_data = credential_data or self._credential_data
+        self._credential_data = credential_data
+        with open(credential_path, 'w') as f:
+            json.dump(credential_data, f)
+        return credential_data
+
+
+    def login(self, username='', password='', device_name='', mfa='', question_id='', question_answer='', credential_path='', save_token=False, token_path=None):
         '''
         Login with email or phone number
 
@@ -98,8 +131,11 @@ class webull:
         CH '+86-XXXXXXXXXXX'
         '''
 
+        if credential_path:
+            self.credential_login(credential_path)
+
         if not username or not password:
-            raise ValueError('username or password is empty')
+            return self.credential_login()
 
         # with webull md5 hash salted
         password = ('wl_app-a&b@!423^' + password).encode('utf-8')
@@ -140,6 +176,7 @@ class webull:
             self._token_expire = result['tokenExpireTime']
             self._uuid = result['uuid']
             self._account_id = self.get_account_id()
+            self._credential_data = result
             if save_token:
                 self._save_token(result, token_path)
         return result
@@ -224,6 +261,10 @@ class webull:
         self.login(uname, pwd)
         return self.get_trade_token(self.trade_pin)
 
+    def trade_prompt(self):
+        self.trade_pin = getpass.getpass('Enter 6 digit Webull Trade PIN:')
+        return self.get_trade_token(self.trade_pin)
+
     def logout(self):
         '''
         End login session
@@ -252,8 +293,8 @@ class webull:
             self._access_token = result['accessToken']
             self._refresh_token = result['refreshToken']
             self._token_expire = result['tokenExpireTime']
+            result['uuid'] = self._uuid
             if save_token:
-                result['uuid'] = self._uuid
                 self._save_token(result, token_path)
         return result
 
@@ -261,13 +302,9 @@ class webull:
         '''
         save login token to webull_credentials.json
         '''
-        filename = 'webull_credentials.json'
-        if path:
-            filename = os.path.join(path, filename)
-        with open(filename, 'wb') as f:
-            pickle.dump(token, f)
-            return True
-        return False
+        path = path or webull.DEFAULT_CREDENTIAL_PATH
+        with open(path, 'w') as f:
+            json.dump(token, f)
 
     def get_detail(self):
         '''
@@ -1302,7 +1339,12 @@ class paper_webull(webull):
 
     def get_positions(self):
         ''' Current positions in paper trading account. '''
-        return self.get_account()['positions']
+        positions_data = self.get_account()['positions']
+        positions = {}
+        for item in positions_data:
+            symbol = item['ticker']['symbol']
+            positions[symbol] = item
+        return positions
 
     def place_order(self, stock=None, tId=None, price=0, action='BUY', orderType='LMT', enforce='GTC', quant=0, outsideRegularTradingHour=True):
         ''' Place a paper account order. '''
